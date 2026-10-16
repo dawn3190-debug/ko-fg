@@ -1,6 +1,7 @@
 streamlit
 finance-datareader
-pykrx
 pandas
 numpy
 plotly
+requests
+lxml

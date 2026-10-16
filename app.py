@@ -33,6 +33,37 @@ def pct_rank(s, window=WINDOW):
     return s.rolling(window).apply(lambda x: (x[:-1] < x[-1]).mean() * 100, raw=True)
 
 
+def load_foreign_flow_naver(n_days=600):
+    """네이버 금융 투자자별 매매동향(코스피)에서 외국인 일별 순매수(억원)를 받아옴.
+    한 번에 10거래일씩 내려오므로, 가장 오래된 날짜의 하루 전을 bizdate로 넣어 거슬러 올라감."""
+    import io, time, requests
+    url = "https://finance.naver.com/sise/investorDealTrendDay.naver"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    bizdate = pd.Timestamp.today()
+    out = {}
+    for _ in range(n_days // 10 + 5):
+        r = requests.get(url, params={"bizdate": bizdate.strftime("%Y%m%d"), "sosok": "01", "page": 1},
+                         headers=headers, timeout=10)
+        r.encoding = "euc-kr"
+        t = pd.read_html(io.StringIO(r.text))[0]
+        t.columns = [" ".join(map(str, c)) if isinstance(c, tuple) else str(c) for c in t.columns]
+        date_col = t.columns[0]
+        fcol = next(c for c in t.columns if "외국인" in c)
+        t[date_col] = pd.to_datetime(t[date_col], format="%y.%m.%d", errors="coerce")
+        t = t.dropna(subset=[date_col])
+        if t.empty:
+            break
+        for d, v in zip(t[date_col], pd.to_numeric(t[fcol], errors="coerce")):
+            out[d] = v
+        bizdate = t[date_col].min() - pd.Timedelta(days=1)
+        if len(out) >= n_days:
+            break
+        time.sleep(0.1)
+    if not out:
+        raise ValueError("네이버에서 빈 데이터가 돌아왔습니다")
+    return pd.Series(out).sort_index()
+
+
 @st.cache_data(ttl=60 * 60)  # 1시간마다 새로 받아옴
 def build():
     kospi = fdr.DataReader("KS11", START)["Close"]
@@ -44,11 +75,8 @@ def build():
 
     warn = None
     try:
-        from pykrx import stock
-        flow = stock.get_market_trading_value_by_date(
-            START.replace("-", ""), pd.Timestamp.today().strftime("%Y%m%d"), "KOSPI"
-        )["외국인합계"].reindex(kospi.index)
-        comp["foreign_flow"] = pct_rank(flow.rolling(20).sum())
+        flow = load_foreign_flow_naver().reindex(kospi.index)
+        comp["foreign_flow"] = pct_rank(flow.rolling(20).sum(min_periods=15))
     except Exception as ex:
         warn = f"외국인 수급 데이터를 받지 못해 제외했습니다 ({ex})"
 
@@ -96,7 +124,7 @@ with c1:
             ],
         },
     ))
-    gauge.update_layout(height=300, margin=dict(t=40, b=10, l=20, r=20))
+    gauge.update_layout(height=300, margin=dict(t=40, b=10, l=35, r=45))
     st.plotly_chart(gauge, use_container_width=True)
     st.metric("KOSPI", f"{last['kospi']:,.2f}",
               f"{(last['kospi'] / prev['kospi'] - 1) * 100:+.2f}%")
